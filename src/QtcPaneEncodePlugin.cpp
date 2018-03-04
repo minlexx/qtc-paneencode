@@ -1,5 +1,6 @@
 #include <QSettings>
 #include <QTranslator>
+#include <QDebug>
 
 #include <projectexplorer/projectexplorer.h>
 #include <projectexplorer/project.h>
@@ -10,6 +11,9 @@
 #include <extensionsystem/pluginmanager.h>
 #include <projectexplorer/buildmanager.h>
 #include <coreplugin/icore.h>
+#include <coreplugin/ioutputpane.h>
+#include <coreplugin/outputwindow.h>
+#include <utils/outputformatter.h>
 
 #include <QtPlugin>
 
@@ -28,6 +32,8 @@ using namespace ExtensionSystem;
 namespace {
   const QString appOutputPaneClassName =
     QLatin1String ("ProjectExplorer::Internal::AppOutputPane");
+  const QString compileOutputWindowClassName =
+    QLatin1String ("ProjectExplorer::Internal::CompileOutputWindow");
 }
 
 QtcPaneEncodePlugin::QtcPaneEncodePlugin () :
@@ -78,7 +84,7 @@ void QtcPaneEncodePlugin::initLanguage () {
 }
 
 void QtcPaneEncodePlugin::updateSettings () {
-  Q_ASSERT (Core::ICore::settings () != NULL);
+  Q_ASSERT (Core::ICore::settings () != nullptr);
   QSettings &settings = *(Core::ICore::settings ());
   settings.beginGroup (SETTINGS_GROUP);
 
@@ -104,22 +110,64 @@ void QtcPaneEncodePlugin::extensionsInitialized () {
   // In the extensionsInitialized function, a plugin can be sure that all
   // plugins that depend on it are completely initialized.
 
-
   // Compiler output
-  connect (BuildManager::instance (), SIGNAL (buildStateChanged (ProjectExplorer::Project *)),
-           this, SLOT (handleBuild (ProjectExplorer::Project *)));
-  connect (this, &QtcPaneEncodePlugin::newOutput,
-           BuildManager::instance (), &BuildManager::addToOutputWindow);
-  connect (this, &QtcPaneEncodePlugin::newTask,
-           BuildManager::instance (), &BuildManager::addToTaskWindow);
+  QObject::connect(BuildManager::instance(), &BuildManager::buildStateChanged,
+           this, &QtcPaneEncodePlugin::handleBuild);
+
+  // These methods are private in BuildEngine, we cannot connect to them
+  // connect (this, &QtcPaneEncodePlugin::newOutput,
+  //         BuildManager::instance (), &BuildManager::addToOutputWindow);  
+  // connect (this, &QtcPaneEncodePlugin::newTask,
+  //         BuildManager::instance (), &BuildManager::addToTaskWindow);
+
+  // connect to lambda instead and use other methods to produce output
+  QObject::connect(this, &QtcPaneEncodePlugin::newOutput, []
+                   (const QString &string, ProjectExplorer::BuildStep::OutputFormat format,
+                   ProjectExplorer::BuildStep::OutputNewlineSetting newlineSetting) {
+      Q_UNUSED(newlineSetting)
+
+      // convert from BuildStep::OutputFormat to Utils::OutputFormat
+      Utils::OutputFormat uformat = Utils::OutputFormat::NormalMessageFormat;
+      switch (format) {
+      case ProjectExplorer::BuildStep::OutputFormat::NormalMessage: uformat = Utils::OutputFormat::NormalMessageFormat; break;
+      case ProjectExplorer::BuildStep::OutputFormat::ErrorMessage : uformat = Utils::OutputFormat::ErrorMessageFormat; break;
+      case ProjectExplorer::BuildStep::OutputFormat::Stderr: uformat = Utils::OutputFormat::StdErrFormat; break;
+      case ProjectExplorer::BuildStep::OutputFormat::Stdout: uformat = Utils::OutputFormat::StdOutFormat; break;
+      }
+
+      QObject *ocompileOutputWindow = PluginManager::getObjectByClassName (compileOutputWindowClassName);
+      Core::IOutputPane *outputPane = qobject_cast<Core::IOutputPane *>(ocompileOutputWindow);
+      if (outputPane) {
+          Core::OutputWindow *outputWindow = qobject_cast<Core::OutputWindow *>(outputPane->outputWidget(nullptr));
+          if (outputWindow) {
+            Utils::OutputFormatter *formatter = outputWindow->formatter();
+            if (formatter == nullptr) {
+                qWarning() << Q_FUNC_INFO << "output pane has no formatter!";
+                Utils::OutputFormatter *newFormatter = new Utils::OutputFormatter();
+                outputWindow->setFormatter(newFormatter);
+                // may cause a memory leak in CompilerOutputWindow?
+                // it seems that output window does not delete formatter itself...
+            }
+            outputWindow->appendMessage(string, uformat); // this is not working if formatter is not set
+            // outputWindow->appendPlainText(string); // this always works, but ignores formatting
+          } else {
+            qWarning() << Q_FUNC_INFO << "we wanted to output; but we can't find Core::OutputWindow :(" << string;
+          }
+      } else {
+        qWarning() << Q_FUNC_INFO << "we wanted to output; but we can't find compile output pane :(" << string;
+      }
+  });
 
   // Run control output
   QObject *appOutputPane = PluginManager::getObjectByClassName (appOutputPaneClassName);
-  if (appOutputPane != NULL) {
-    connect (ProjectExplorerPlugin::instance (), SIGNAL (runControlStarted (ProjectExplorer::RunControl *)),
-             this, SLOT (handleRunStart (ProjectExplorer::RunControl *)));
-    connect (this, SIGNAL (newMessage (ProjectExplorer::RunControl *,QString,Utils::OutputFormat)),
-             appOutputPane, SLOT (appendMessage (ProjectExplorer::RunControl *,QString,Utils::OutputFormat)));
+  if (appOutputPane != nullptr) {
+    // TODO: no such signal anymore
+    // QObject::connect: No such signal ProjectExplorer::ProjectExplorerPlugin::runControlStarted (ProjectExplorer::RunControl *)
+    // QObject::connect(ProjectExplorerPlugin::instance(), SIGNAL (runControlStarted (ProjectExplorer::RunControl *)),
+    //         this, SLOT (handleRunStart (ProjectExplorer::RunControl *)));
+
+    QObject::connect(this, SIGNAL (newMessage (ProjectExplorer::RunControl *,QString,Utils::OutputFormat)),
+                   appOutputPane, SLOT (appendMessage (ProjectExplorer::RunControl *,QString,Utils::OutputFormat)));
   }
   else {
     qCritical () << "Failed to find appOutputPane";
@@ -138,45 +186,42 @@ void QtcPaneEncodePlugin::handleBuild (ProjectExplorer::Project *project) {
   if (!BuildManager::isBuilding ()) {
     return;
   }
-  const Target *buildingTarget = NULL;
-  foreach (Target * target, project->targets ()) {
+
+  const Target *buildingTarget = nullptr;
+  for (ProjectExplorer::Target *target : project->targets()) {
     if (BuildManager::isBuilding (target)) {
       buildingTarget = target;
       break;
     }
   }
-  if (buildingTarget == NULL) {
+  if (buildingTarget == nullptr) {
     return;
   }
 
-  BuildConfiguration *buildingConfiguration = NULL;
-  foreach (BuildConfiguration * config, buildingTarget->buildConfigurations ()) {
+  BuildConfiguration *buildingConfiguration = nullptr;
+  for (ProjectExplorer::BuildConfiguration *config : buildingTarget->buildConfigurations()) {
     if (BuildManager::isBuilding (config)) {
       buildingConfiguration = config;
       break;
     }
   }
-  if (buildingConfiguration == NULL) {
+  if (buildingConfiguration == nullptr) {
     return;
   }
 
   QList<Core::Id> stepsIds = buildingConfiguration->knownStepLists ();
-  foreach (const Core::Id & id, stepsIds) {
+  for (const Core::Id &id : stepsIds) {
     BuildStepList *steps = buildingConfiguration->stepList (id);
-    if (steps == NULL) {
+    if (steps == nullptr) {
       continue;
     }
     for (int i = 0, end = steps->count (); i < end; ++i) {
       BuildStep *step = steps->at (i);
-      disconnect (step, &BuildStep::addOutput, 0, 0);
-      connect (step, SIGNAL (addOutput (QString,ProjectExplorer::BuildStep::OutputFormat,ProjectExplorer::BuildStep::OutputNewlineSetting)),
-               this, SLOT (addOutput (QString,ProjectExplorer::BuildStep::OutputFormat,ProjectExplorer::BuildStep::OutputNewlineSetting)),
-               Qt::UniqueConnection);
+      QObject::disconnect(step, &BuildStep::addOutput, nullptr, nullptr);
+      QObject::connect(step, &BuildStep::addOutput, this, &QtcPaneEncodePlugin::addOutput, Qt::UniqueConnection);
 
-      disconnect (step, &BuildStep::addTask, 0, 0);
-      connect (step, SIGNAL (addTask (ProjectExplorer::Task,int,int)),
-               this, SLOT (addTask (ProjectExplorer::Task,int,int)),
-               Qt::UniqueConnection);
+      QObject::disconnect(step, &BuildStep::addTask, nullptr, nullptr);
+      QObject::connect(step, &BuildStep::addTask, this, &QtcPaneEncodePlugin::addTask, Qt::UniqueConnection);
     }
   }
 }
@@ -205,7 +250,7 @@ void QtcPaneEncodePlugin::addOutput (const QString &string, BuildStep::OutputFor
 
 void QtcPaneEncodePlugin::handleRunStart (RunControl *runControl) {
   QObject *appOutputPane = PluginManager::getObjectByClassName (appOutputPaneClassName);
-  if (appOutputPane != NULL) {
+  if (appOutputPane != nullptr) {
     connect (runControl, SIGNAL (appendMessage (ProjectExplorer::RunControl *,QString,Utils::OutputFormat)),
              this, SLOT (appendMessage (ProjectExplorer::RunControl *,QString,Utils::OutputFormat)),
              Qt::UniqueConnection);
