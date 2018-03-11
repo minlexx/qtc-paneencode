@@ -124,15 +124,20 @@ void QtcPaneEncodePlugin::extensionsInitialized () {
   QObject::connect(this, &QtcPaneEncodePlugin::newOutput, []
                    (const QString &string, ProjectExplorer::BuildStep::OutputFormat format,
                    ProjectExplorer::BuildStep::OutputNewlineSetting newlineSetting) {
-      Q_UNUSED(newlineSetting)
+      QString outString(string);
+
+      // append new line?
+      if (newlineSetting == ProjectExplorer::BuildStep::OutputNewlineSetting::DoAppendNewline) {
+          outString += QLatin1String("\n");
+      }
 
       // convert from BuildStep::OutputFormat to Utils::OutputFormat
       Utils::OutputFormat uformat = Utils::OutputFormat::NormalMessageFormat;
       switch (format) {
       case ProjectExplorer::BuildStep::OutputFormat::NormalMessage: uformat = Utils::OutputFormat::NormalMessageFormat; break;
       case ProjectExplorer::BuildStep::OutputFormat::ErrorMessage : uformat = Utils::OutputFormat::ErrorMessageFormat; break;
-      case ProjectExplorer::BuildStep::OutputFormat::Stderr: uformat = Utils::OutputFormat::StdErrFormat; break;
-      case ProjectExplorer::BuildStep::OutputFormat::Stdout: uformat = Utils::OutputFormat::StdOutFormat; break;
+      case ProjectExplorer::BuildStep::OutputFormat::Stderr: uformat = Utils::OutputFormat::StdErrFormatSameLine; break;
+      case ProjectExplorer::BuildStep::OutputFormat::Stdout: uformat = Utils::OutputFormat::StdOutFormatSameLine; break;
       }
 
       QObject *ocompileOutputWindow = PluginManager::getObjectByClassName (compileOutputWindowClassName);
@@ -148,7 +153,7 @@ void QtcPaneEncodePlugin::extensionsInitialized () {
                 // may cause a memory leak in CompilerOutputWindow?
                 // it seems that output window does not delete formatter itself...
             }
-            outputWindow->appendMessage(string, uformat); // this is not working if formatter is not set
+            outputWindow->appendMessage(outString, uformat); // this is not working if formatter is not set
             // outputWindow->appendPlainText(string); // this always works, but ignores formatting
           } else {
             qWarning() << Q_FUNC_INFO << "we wanted to output; but we can't find Core::OutputWindow :(" << string;
